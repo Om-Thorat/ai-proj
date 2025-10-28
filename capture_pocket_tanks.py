@@ -7,7 +7,10 @@ from PIL import ImageGrab, Image, ImageOps, ImageChops
 import win32gui
 import win32con
 import ctypes
+import colorsys
 import pytesseract
+import cv2
+import numpy as np
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -63,26 +66,13 @@ def bring_window_to_front(hwnd: int) -> None:
         pass
 
 
-def capture_corners(rect: Tuple[int, int, int, int], outdir: str, size: int = 100) -> List[str]:
+def capture_full_screenshot(rect: Tuple[int, int, int, int], outdir: str) -> Optional[str]:
     left, top, right, bottom = rect
-    width = right - left
-    height = bottom - top
-    capture_size = max(1, min(size, width, height))
-
-    boxes = {
-        "full": (left, top, right, bottom)
-    }
-
     os.makedirs(outdir, exist_ok=True)
-    saved = []
-    ts = int(time.time())
-    for name, box in boxes.items():
-        im = ImageGrab.grab(bbox=box)
-        fname = os.path.join(outdir, f"{ts}_{name}.png")
-        im.save(fname)
-        saved.append(fname)
-
-    return saved
+    screenshot = ImageGrab.grab(bbox=(left, top, right, bottom))
+    fname = os.path.join(outdir, "latest_screenshot.png")
+    screenshot.save(fname)
+    return fname
 
 def extract_digits_from_image(image_path: str, bbox: tuple) -> int:
     try:
@@ -102,11 +92,34 @@ def extract_text_from_image(image_path: str, bbox: tuple) -> str:
     try:
         img = Image.open(image_path)
         cropped_img = img.crop(bbox)
-        text = pytesseract.image_to_string(cropped_img, config='--psm 7') # Default PSM for general text
+        text = pytesseract.image_to_string(cropped_img, config='--psm 7') 
         return text.strip()
     except Exception as e:
         print(f"Error extracting text: {e}")
         return ""
+
+def get_dominant_color(image_path: str, bbox: tuple) -> Optional[Tuple[int, int, int]]:
+    try:
+        img = Image.open(image_path)
+        cropped_img = img.crop(bbox)
+        cropped_img = cropped_img.convert("RGB")
+        
+        pixels = cropped_img.getdata()
+        
+        filtered_pixels = [p for p in pixels if p != (0, 0, 0) and p != (255, 255, 255)]
+
+        if not filtered_pixels:
+            return None
+
+        color_counts = {}
+        for pixel in filtered_pixels:
+            color_counts[pixel] = color_counts.get(pixel, 0) + 1
+
+        dominant_color = max(color_counts, key=color_counts.get)
+        return dominant_color
+    except Exception as e:
+        print(f"Error getting dominant color: {e}")
+        return None
 
 def _normalize_digit_image(img: Image.Image, size=(20, 30)) -> Image.Image:
     img = img.convert("L")
@@ -117,6 +130,213 @@ def _normalize_digit_image(img: Image.Image, size=(20, 30)) -> Image.Image:
     canvas.paste(img, (x, y))
     bw = canvas.point(lambda p: 0 if p < 128 else 255, "1")
     return bw.convert("L")
+
+def _rgb_to_hsv_tuple(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
+    r, g, b = rgb
+    h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+    return (h, s, v)
+
+
+def create_color_mask_for_target_in_image(image_path: str, game_bbox: tuple, target_rgb: Tuple[int, int, int],
+                                          hue_tol: float = 0.06, sat_tol: float = 0.25, val_tol: float = 0.25,
+                                          output_dir: Optional[str] = "pocket_tanks_corners") -> Optional[str]:
+    try:
+        img = Image.open(image_path).convert("RGB")
+        left, top, right, bottom = game_bbox
+        w = right - left
+        h = bottom - top
+        region = img.crop(game_bbox)
+        region_np = np.array(region)
+        region_bgr = cv2.cvtColor(region_np, cv2.COLOR_RGB2BGR)
+        hsv = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2HSV)
+
+        th, ts, tv = _rgb_to_hsv_tuple(target_rgb)
+        target_h = int(th * 179)
+        target_s = int(ts * 255)
+        target_v = int(tv * 255)
+
+        dh = int(max(1, hue_tol * 179))
+        ds = int(max(1, sat_tol * 255))
+        dv = int(max(1, val_tol * 255))
+
+        lower_h = (target_h - dh) % 180
+        upper_h = (target_h + dh) % 180
+        lower_s = max(0, target_s - ds)
+        upper_s = min(255, target_s + ds)
+        lower_v = max(0, target_v - dv)
+        upper_v = min(255, target_v + dv)
+
+        if lower_h <= upper_h:
+            lower = np.array([lower_h, lower_s, lower_v], dtype=np.uint8)
+            upper = np.array([upper_h, upper_s, upper_v], dtype=np.uint8)
+            mask = cv2.inRange(hsv, lower, upper)
+        else:
+            lower1 = np.array([0, lower_s, lower_v], dtype=np.uint8)
+            upper1 = np.array([upper_h, upper_s, upper_v], dtype=np.uint8)
+            lower2 = np.array([lower_h, lower_s, lower_v], dtype=np.uint8)
+            upper2 = np.array([179, upper_s, upper_v], dtype=np.uint8)
+            mask1 = cv2.inRange(hsv, lower1, upper1)
+            mask2 = cv2.inRange(hsv, lower2, upper2)
+            mask = cv2.bitwise_or(mask1, mask2)
+
+        os.makedirs(output_dir, exist_ok=True)
+        ts = int(time.time())
+        mask_path = os.path.join(output_dir, f"color_mask.png")
+        cv2.imwrite(mask_path, mask)
+
+
+        return mask_path
+    except Exception as e:
+        print(f"Error creating color mask: {e}")
+        return None
+
+
+def analyze_mask_and_get_centroid(mask_path: str, bbox: tuple) -> Optional[Tuple[int, int]]:
+    try:
+        if not os.path.isfile(mask_path):
+            return None
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            return None
+
+        # Find contours
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        # Choose largest contour by area
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        if area <= 0:
+            return None
+
+        M = cv2.moments(largest)
+        if M.get('m00', 0) == 0:
+            return None
+        cx = int(M['m10'] / M['m00'])
+        cy = int(M['m01'] / M['m00'])
+
+        left, top, right, bottom = bbox
+        screen_x = left + cx
+        screen_y = top + cy
+        return (screen_x, screen_y)
+    except Exception as e:
+        print(f"Error analyzing mask for centroid: {e}")
+        return None
+
+
+def create_mask_and_centroid_for_player(player_label: str,
+                                        full_screenshot_path: str,
+                                        game_bbox: tuple,
+                                        region_bbox: Optional[tuple],
+                                        output_dir: str = "pocket_tanks_corners",
+                                        hue_tol: float = 0.07,
+                                        sat_tol: float = 0.28,
+                                        val_tol: float = 0.28) -> Tuple[Optional[str], Optional[Tuple[int, int]], Optional[Tuple[int,int,int]]]:
+    try:
+        dominant = None
+
+        if dominant is None and region_bbox:
+            try:
+                dominant = get_dominant_color(full_screenshot_path, region_bbox)
+            except Exception:
+                pass
+
+        if not dominant:
+            return None, None, None
+
+        left, top, right, bottom = game_bbox
+        sample_bbox = (left, 60, right, 900)
+
+        mask_path = create_color_mask_for_target_in_image(full_screenshot_path, sample_bbox, dominant,
+                                                         hue_tol=hue_tol, sat_tol=sat_tol, val_tol=val_tol,
+                                                         output_dir=output_dir)
+        if not mask_path:
+            return None, None, dominant
+
+        centroid = analyze_mask_and_get_centroid(mask_path, sample_bbox)
+        return mask_path, centroid, dominant
+    except Exception:
+        return None, None, None
+
+
+def find_tank_position(image_path: str, tank_color: Tuple[int, int, int], game_bbox: tuple,
+                       hue_tol: float = 0.03, min_sat: float = 0.4, min_val: float = 0.3) -> Optional[Tuple[int, int]]:
+    try:
+        img = Image.open(image_path)
+        game_region = img.crop(game_bbox).convert("RGB")
+
+        width, height = game_region.size
+
+        target_h, target_s, target_v = _rgb_to_hsv_tuple(tank_color)
+
+        pixels = list(game_region.getdata())
+        mask = [False] * (width * height)
+        for i, (r, g, b) in enumerate(pixels):
+            h, s, v = colorsys.rgb_to_hsv(r / 255.0, g / 255.0, b / 255.0)
+            dh = abs(h - target_h)
+            dh = min(dh, 1.0 - dh)
+            if dh <= hue_tol and s >= min_sat and v >= min_val:
+                mask[i] = True
+
+        if not any(mask):
+            return None
+
+        visited = [False] * (width * height)
+        largest_cc = None
+        largest_size = 0
+        largest_bbox = None
+
+        def idx(x, y):
+            return y * width + x
+
+        for y in range(height):
+            for x in range(width):
+                i = idx(x, y)
+                if not mask[i] or visited[i]:
+                    continue
+                # flood fill
+                stack = [(x, y)]
+                visited[i] = True
+                coords = []
+                min_x, max_x = x, x
+                min_y, max_y = y, y
+
+                while stack:
+                    cx, cy = stack.pop()
+                    coords.append((cx, cy))
+                    min_x = min(min_x, cx)
+                    max_x = max(max_x, cx)
+                    min_y = min(min_y, cy)
+                    max_y = max(max_y, cy)
+
+                    # neighbors
+                    for nx, ny in ((cx-1, cy), (cx+1, cy), (cx, cy-1), (cx, cy+1)):
+                        if 0 <= nx < width and 0 <= ny < height:
+                            ni = idx(nx, ny)
+                            if not visited[ni] and mask[ni]:
+                                visited[ni] = True
+                                stack.append((nx, ny))
+
+                if len(coords) > largest_size:
+                    largest_size = len(coords)
+                    largest_cc = coords
+                    largest_bbox = (min_x, min_y, max_x, max_y)
+
+        if not largest_cc:
+            return None
+
+        # Compute centroid of largest component
+        sx = sum(p[0] for p in largest_cc)
+        sy = sum(p[1] for p in largest_cc)
+        cx = int(sx / len(largest_cc))
+        cy = int(sy / len(largest_cc))
+
+        screen_x = game_bbox[0] + cx
+        screen_y = game_bbox[1] + cy
+        return (screen_x, screen_y)
+    except Exception:
+        return None
 
 def load_digit_templates(template_dir: str) -> Dict[int, Image.Image]:
     templates: Dict[int, Image.Image] = {}
@@ -197,32 +417,6 @@ def image_region_to_int(image_path: str, bbox: tuple, templates_dir: str = "digi
     except Exception:
         return -1
 
-def image_region_file_to_int(region_path: str, templates_dir: str = "digit_templates\\candidates", max_score=0.25) -> int:
-    try:
-        img = Image.open(region_path)
-        templates = load_digit_templates(templates_dir)
-        if not templates and templates_dir.endswith("candidates"):
-            templates = load_digit_templates(os.path.dirname(templates_dir))
-        if not templates:
-            text = pytesseract.image_to_string(img, config='-c tessedit_char_whitelist=0123456789 --psm 7')
-            s = ''.join(filter(str.isdigit, text))
-            return int(s) if s else -1
-        segments = _segment_digits_by_projection(img)
-        if not segments:
-            text = pytesseract.image_to_string(img, config='-c tessedit_char_whitelist=0123456789 --psm 7')
-            s = ''.join(filter(str.isdigit, text))
-            return int(s) if s else -1
-        digits = []
-        for seg in segments:
-            d, score = _match_digit_image(seg, templates)
-            if d == -1 or score > max_score:
-                text = pytesseract.image_to_string(img, config='-c tessedit_char_whitelist=0123456789 --psm 7')
-                s = ''.join(filter(str.isdigit, text))
-                return int(s) if s else -1
-            digits.append(str(d))
-        return int(''.join(digits)) if digits else -1
-    except Exception:
-        return -1
 
 def main() -> None:
     ctypes.windll.user32.SetProcessDPIAware()
@@ -237,23 +431,15 @@ def main() -> None:
     time.sleep(0.5)
 
     rect = get_client_screen_rect(hwnd)
-    print(rect)
     left, top, right, bottom = rect
     width = right - left
     height = bottom - top
-    print(left,top,right,bottom)
 
     size = 100
     if width < size or height < size:
         size = min(width, height)
 
-    saved_image_paths = capture_corners(rect, "pocket_tanks_corners", size=size)
-
-    full_screenshot_path = None
-    for path in saved_image_paths:
-        if "full.png" in path:
-            full_screenshot_path = path
-            break
+    full_screenshot_path = capture_full_screenshot(rect, "pocket_tanks_corners")
 
     if full_screenshot_path:
         all_bboxes = {
@@ -267,23 +453,14 @@ def main() -> None:
             "p2_points": (1348, 68,1595 , 118),
         }
 
+        game_bbox = (0, 60, 1600, 900)
+
         full_img = Image.open(full_screenshot_path)
         ts = int(time.time())
         p1_points_region_path = None
         p2_points_region_path = None
-
-        for name, bbox in all_bboxes.items():
-            try:
-                cropped_region_img = full_img.crop(bbox)
-                region_path = os.path.join("pocket_tanks_corners", f"{ts}_{name}_region.png")
-                cropped_region_img.save(region_path)
-                print(f"Saved {name} region image to: {region_path}")
-                if name == "p1_points":
-                    p1_points_region_path = region_path
-                elif name == "p2_points":
-                    p2_points_region_path = region_path
-            except Exception as e:
-                print(f"Error saving {name} region image with bbox={bbox}: {e}")
+        p1_name_region_path = None
+        p2_name_region_path = None
 
         extracted_angle = extract_digits_from_image(full_screenshot_path, all_bboxes["angle"])
         print(f"Extracted Angle: {extracted_angle}°")
@@ -300,14 +477,21 @@ def main() -> None:
         extracted_p1 = extract_text_from_image(full_screenshot_path, all_bboxes["p1_name"])
         print(f"Extracted Player 1 Name: {extracted_p1}")
 
-        extracted_p1_points = image_region_file_to_int(p1_points_region_path, templates_dir="digit_templates\\candidates") if p1_points_region_path else -1
+        extracted_p1_points = image_region_to_int(full_screenshot_path,all_bboxes["p1_points"], templates_dir="digit_templates\\candidates")
         print(f"Extracted Player 1 Points: {extracted_p1_points}")
 
         extracted_p2 = extract_text_from_image(full_screenshot_path, all_bboxes["p2_name"])
         print(f"Extracted Player 2 Name: {extracted_p2}")
 
-        extracted_p2_points = image_region_file_to_int(p2_points_region_path, templates_dir="digit_templates\\candidates") if p2_points_region_path else -1
+        extracted_p2_points = image_region_to_int(full_screenshot_path,all_bboxes["p2_points"], templates_dir="digit_templates\\candidates")
         print(f"Extracted Player 2 Points: {extracted_p2_points}")
+
+        p1_mask, p1_centroid, p1_dom = create_mask_and_centroid_for_player("P1", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p1_name"))
+
+        p2_mask, p2_centroid, p2_dom = create_mask_and_centroid_for_player("P2", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p2_name"))
+
+        print(f"P1 Position: {p1_centroid}")
+        print(f"P2 Position: {p2_centroid}")
 
     else:
         print("Full screenshot not found for OCR extraction.")
