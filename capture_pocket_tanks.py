@@ -224,6 +224,71 @@ def analyze_mask_and_get_centroid(mask_path: str, bbox: tuple) -> Optional[Tuple
         print(f"Error analyzing mask for centroid: {e}")
         return None
 
+def highest_green_point_between_tanks(
+    image_path: str,
+    game_bbox: Tuple[int, int, int, int],
+    x1: int,
+    x2: int,
+    min_surface_y: int = 30
+) -> Optional[Tuple[int, int]]:
+    try:
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+
+        left, top, right, bottom = game_bbox
+        left = max(0, left); top = max(0, top)
+        right = min(img.shape[1], right); bottom = min(img.shape[0], bottom)
+        if right <= left or bottom <= top:
+            return None
+
+        roi = img[top:bottom, left:right]
+        if roi.size == 0:
+            return None
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        # Broad green mask; adjust if your terrain hue differs
+        lower_green = np.array([35, 40, 40], dtype=np.uint8)   # H in [0,179]
+        upper_green = np.array([90, 255, 255], dtype=np.uint8)
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+
+    
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        h, w = mask.shape[:2]
+
+        # clamping x-range to ROI
+        x_lo = max(min(x1, x2) - left, 0)
+        x_hi = min(max(x1, x2) - left, w - 1)
+        if x_hi <= x_lo:
+            return None
+
+        best_x = None
+        best_y = None
+
+        #this calcualtes first green pixel from top for each column 
+        for x in range(x_lo, x_hi + 1):
+            col = mask[:, x]
+            ys = np.where(col > 0)[0]
+            if ys.size == 0:
+                continue
+            y = int(ys[0])
+            if y < min_surface_y:
+                continue
+            if best_y is None or y < best_y:
+                best_y = y
+                best_x = x
+
+        if best_x is None:
+            return None
+
+        return (left + best_x, top + best_y)
+    except Exception as e:
+        print(f"Error finding highest green point: {e}")
+        return None
 
 def create_mask_and_centroid_for_player(player_label: str,
                                         full_screenshot_path: str,
@@ -417,6 +482,45 @@ def image_region_to_int(image_path: str, bbox: tuple, templates_dir: str = "digi
     except Exception:
         return -1
 
+# this basically annotates the peak , had it for debugging purposes
+def annotate_points_on_image(
+    image_path: str,
+    rect: Tuple[int, int, int, int],
+    points: List[Tuple[str, Optional[Tuple[int, int]], Tuple[int, int, int]]],
+    out_path: Optional[str] = None
+) -> Optional[str]:
+
+    try:
+        img = cv2.imread(image_path, cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+
+        h, w = img.shape[:2]
+
+        for label, pt, color in points:
+            if not pt:
+                continue
+            x = int(pt[0])
+            y = int(pt[1])
+            if x < 0 or y < 0 or x >= w or y >= h:
+                continue
+
+            size = 12  # larger for visibility
+            thickness = 2
+            cv2.line(img, (x - size, y), (x + size, y), color, thickness, cv2.LINE_AA)
+            cv2.line(img, (x, y - size), (x, y + size), color, thickness, cv2.LINE_AA)
+            cv2.circle(img, (x, y), 4, color, -1, cv2.LINE_AA)
+            cv2.putText(img, label, (x + 12, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+        if out_path is None:
+            out_dir = os.path.dirname(image_path)
+            out_path = os.path.join(out_dir, "annotated_latest_screenshot.png")
+
+        cv2.imwrite(out_path, img)
+        return out_path
+    except Exception as e:
+        print(f"Error annotating image: {e}")
+        return None
 
 def main() -> None:
     ctypes.windll.user32.SetProcessDPIAware()
@@ -492,6 +596,30 @@ def main() -> None:
 
         print(f"P1 Position: {p1_centroid}")
         print(f"P2 Position: {p2_centroid}")
+
+        # Find highest green terrain point between tanks
+        peak_green = None
+        if p1_centroid and p2_centroid:
+            peak_green = highest_green_point_between_tanks(
+                full_screenshot_path,
+                game_bbox,
+                p1_centroid[0],
+                p2_centroid[0],
+                min_surface_y=30
+            )
+            print(f"Highest green terrain point between tanks: {peak_green}")
+        else:
+            print("Highest green terrain point: cannot compute (missing tank positions).")
+
+        # Annotate the peak on the image for visual verification
+        annot_path = annotate_points_on_image(
+            full_screenshot_path,
+            rect,
+            [("Peak", peak_green, (0, 0, 255))],
+            out_path=os.path.join("pocket_tanks_corners", "annotated_latest_screenshot.png")
+        )
+        if annot_path:
+            print(f"Annotated image saved at: {annot_path}")
 
     else:
         print("Full screenshot not found for OCR extraction.")
