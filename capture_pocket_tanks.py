@@ -12,7 +12,103 @@ import pytesseract
 import cv2
 import numpy as np
 
+import keyboard as kb
+
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+def move_left(steps=1, delay=0.01):
+    for _ in range(steps):
+        kb.press('comma')
+        time.sleep(delay)
+        kb.release('comma')
+        time.sleep(delay)
+
+
+def move_right(steps=1, delay=0.01):
+    for _ in range(steps):
+        kb.press('dot')
+        time.sleep(delay)
+        kb.release('dot')
+        time.sleep(delay)
+
+
+def increase_angle(steps=1, delay=0.01):
+    for _ in range(steps):
+        kb.press('right')
+        time.sleep(delay)
+        kb.release('right')
+        time.sleep(delay)
+
+
+def decrease_angle(steps=1, delay=0.01):
+    for _ in range(steps):
+        kb.press('left')
+        time.sleep(delay)
+        kb.release('left')
+        time.sleep(delay)
+
+
+def increase_power(steps=1, delay=0.01):
+    for _ in range(steps):
+        kb.press('up')
+        time.sleep(delay)
+        kb.release('up')
+        time.sleep(delay)
+
+
+def decrease_power(steps=1, delay=0.01):
+    for _ in range(steps):
+        kb.press('down')
+        time.sleep(delay)
+        kb.release('down')
+        time.sleep(delay)
+
+
+def fire(delay=0.01):
+    kb.press('space')
+    time.sleep(delay)
+    kb.release('space')
+    time.sleep(delay)
+   
+# thisss is just experimental stuff havent tested at all
+def detect_explosion_coordinates(
+    hwnd: int,
+    game_bbox: Tuple[int, int, int, int],
+    timeout_seconds: float = 5.0,
+    threshold: int = 50,
+    min_contour_area: int = 100
+) -> Optional[Tuple[int, int]]:
+
+    bring_window_to_front(hwnd)
+    time.sleep(0.1)
+
+    img_before = ImageGrab.grab(bbox=game_bbox)
+    gray_before = cv2.cvtColor(np.array(img_before), cv2.COLOR_RGB2GRAY)
+
+    fire()
+    print("--- Fired! Watching for impact... ---")
+
+    start_time = time.time()
+    while time.time() - start_time < timeout_seconds:
+        img_after = ImageGrab.grab(bbox=game_bbox)
+        gray_after = cv2.cvtColor(np.array(img_after), cv2.COLOR_RGB2GRAY)
+
+        frame_delta = cv2.absdiff(gray_before, gray_after)
+        _, thresh = cv2.threshold(frame_delta, threshold, 255, cv2.THRESH_BINARY)
+        
+        thresh = cv2.dilate(thresh, None, iterations=2)
+
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        for contour in contours:
+            if cv2.contourArea(contour) > min_contour_area:
+                M = cv2.moments(contour)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"]) + game_bbox[0] 
+                    cy = int(M["m01"] / M["m00"]) + game_bbox[1]
+                    return (cx, cy)
+        time.sleep(0.05) 
+    return None
 
 def find_window_by_title_substring(sub: str) -> Optional[Tuple[int, str]]:
     sub = (sub or "").lower()
@@ -138,13 +234,9 @@ def _rgb_to_hsv_tuple(rgb: Tuple[int, int, int]) -> Tuple[float, float, float]:
 
 
 def create_color_mask_for_target_in_image(image_path: str, game_bbox: tuple, target_rgb: Tuple[int, int, int],
-                                          hue_tol: float = 0.06, sat_tol: float = 0.25, val_tol: float = 0.25,
-                                          output_dir: Optional[str] = "pocket_tanks_corners") -> Optional[str]:
+                                          hue_tol: float = 0.06, sat_tol: float = 0.25, val_tol: float = 0.25) -> Optional[np.ndarray]:
     try:
         img = Image.open(image_path).convert("RGB")
-        left, top, right, bottom = game_bbox
-        w = right - left
-        h = bottom - top
         region = img.crop(game_bbox)
         region_np = np.array(region)
         region_bgr = cv2.cvtColor(region_np, cv2.COLOR_RGB2BGR)
@@ -179,32 +271,21 @@ def create_color_mask_for_target_in_image(image_path: str, game_bbox: tuple, tar
             mask2 = cv2.inRange(hsv, lower2, upper2)
             mask = cv2.bitwise_or(mask1, mask2)
 
-        os.makedirs(output_dir, exist_ok=True)
-        ts = int(time.time())
-        mask_path = os.path.join(output_dir, f"color_mask.png")
-        cv2.imwrite(mask_path, mask)
-
-
-        return mask_path
+        return mask
     except Exception as e:
         print(f"Error creating color mask: {e}")
         return None
 
 
-def analyze_mask_and_get_centroid(mask_path: str, bbox: tuple) -> Optional[Tuple[int, int]]:
+def analyze_mask_and_get_centroid(mask: np.ndarray, bbox: tuple) -> Optional[Tuple[int, int]]:
     try:
-        if not os.path.isfile(mask_path):
-            return None
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if mask is None:
             return None
 
-        # Find contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return None
 
-        # Choose largest contour by area
         largest = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(largest)
         if area <= 0:
@@ -294,10 +375,9 @@ def create_mask_and_centroid_for_player(player_label: str,
                                         full_screenshot_path: str,
                                         game_bbox: tuple,
                                         region_bbox: Optional[tuple],
-                                        output_dir: str = "pocket_tanks_corners",
                                         hue_tol: float = 0.07,
                                         sat_tol: float = 0.28,
-                                        val_tol: float = 0.28) -> Tuple[Optional[str], Optional[Tuple[int, int]], Optional[Tuple[int,int,int]]]:
+                                        val_tol: float = 0.28) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int]], Optional[Tuple[int,int,int]]]:
     try:
         dominant = None
 
@@ -313,14 +393,13 @@ def create_mask_and_centroid_for_player(player_label: str,
         left, top, right, bottom = game_bbox
         sample_bbox = (left, 60, right, 900)
 
-        mask_path = create_color_mask_for_target_in_image(full_screenshot_path, sample_bbox, dominant,
-                                                         hue_tol=hue_tol, sat_tol=sat_tol, val_tol=val_tol,
-                                                         output_dir=output_dir)
-        if not mask_path:
+        mask = create_color_mask_for_target_in_image(full_screenshot_path, sample_bbox, dominant,
+                                                    hue_tol=hue_tol, sat_tol=sat_tol, val_tol=val_tol)
+        if mask is None:
             return None, None, dominant
 
-        centroid = analyze_mask_and_get_centroid(mask_path, sample_bbox)
-        return mask_path, centroid, dominant
+        centroid = analyze_mask_and_get_centroid(mask, sample_bbox)
+        return mask, centroid, dominant
     except Exception:
         return None, None, None
 
@@ -522,6 +601,72 @@ def annotate_points_on_image(
         print(f"Error annotating image: {e}")
         return None
 
+def get_state():
+    ctypes.windll.user32.SetProcessDPIAware()
+
+    found = find_window_by_title_substring("Pocket Tanks")
+    if not found:
+        return
+
+    hwnd, actual_title = found
+
+    bring_window_to_front(hwnd)
+    time.sleep(0.5)
+
+    rect = get_client_screen_rect(hwnd)
+    left, top, right, bottom = rect
+    width = right - left
+    height = bottom - top
+
+    size = 100
+    if width < size or height < size:
+        size = min(width, height)
+
+    full_screenshot_path = capture_full_screenshot(rect, "pocket_tanks_corners")
+
+    if full_screenshot_path:
+        all_bboxes = {
+            "angle": (1000, 975, 1075, 1050),
+            "power": (1002, 1127, 1085, 1166),
+            "move": (531, 987, 606, 1022),
+            "weapon": (550, 1109, 753, 1153),
+            "p1_name": (0, 0, 241, 55),
+            "p1_points": (0, 70, 205, 116),
+            "p2_name": (1215, 4, 1590, 63),
+            "p2_points": (1348, 68,1595 , 118),
+        }
+
+        game_bbox = (0, 60, 1600, 900)
+
+        full_img = Image.open(full_screenshot_path)
+        ts = int(time.time())
+        p1_points_region_path = None
+        p2_points_region_path = None
+        p1_name_region_path = None
+        p2_name_region_path = None
+
+        extracted_angle = extract_digits_from_image(full_screenshot_path, all_bboxes["angle"])
+
+        extracted_power = extract_digits_from_image(full_screenshot_path, all_bboxes["power"])
+
+        extracted_move = extract_digits_from_image(full_screenshot_path, all_bboxes["move"])
+
+        extracted_weapon = extract_text_from_image(full_screenshot_path, all_bboxes["weapon"])
+
+        extracted_p1 = extract_text_from_image(full_screenshot_path, all_bboxes["p1_name"])
+
+        extracted_p1_points = image_region_to_int(full_screenshot_path,all_bboxes["p1_points"], templates_dir="digit_templates\\candidates")
+
+        extracted_p2 = extract_text_from_image(full_screenshot_path, all_bboxes["p2_name"])
+
+        extracted_p2_points = image_region_to_int(full_screenshot_path,all_bboxes["p2_points"], templates_dir="digit_templates\\candidates")
+
+
+        p1_mask, p1_centroid, p1_dom = create_mask_and_centroid_for_player("P1", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p1_name"))
+        p2_mask, p2_centroid, p2_dom = create_mask_and_centroid_for_player("P2", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p2_name"))
+
+        return extracted_angle, extracted_power, extracted_p1_points, extracted_p2_points, p1_centroid, p2_centroid
+
 def main() -> None:
     ctypes.windll.user32.SetProcessDPIAware()
 
@@ -590,8 +735,8 @@ def main() -> None:
         extracted_p2_points = image_region_to_int(full_screenshot_path,all_bboxes["p2_points"], templates_dir="digit_templates\\candidates")
         print(f"Extracted Player 2 Points: {extracted_p2_points}")
 
-        p1_mask, p1_centroid, p1_dom = create_mask_and_centroid_for_player("P1", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p1_name"))
 
+        p1_mask, p1_centroid, p1_dom = create_mask_and_centroid_for_player("P1", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p1_name"))
         p2_mask, p2_centroid, p2_dom = create_mask_and_centroid_for_player("P2", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p2_name"))
 
         print(f"P1 Position: {p1_centroid}")
@@ -620,9 +765,14 @@ def main() -> None:
         )
         if annot_path:
             print(f"Annotated image saved at: {annot_path}")
+    
 
     else:
         print("Full screenshot not found for OCR extraction.")
+
+    decrease_angle(30)
+    decrease_power(35)
+    fire()
 
 
 if __name__ == "__main__":
