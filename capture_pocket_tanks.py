@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 
 import keyboard as kb
+import math
 
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
@@ -34,17 +35,17 @@ def move_right(steps=1, delay=0.01):
 
 def increase_angle(steps=1, delay=0.01):
     for _ in range(steps):
-        kb.press('right')
+        kb.press('left')
         time.sleep(delay)
-        kb.release('right')
+        kb.release('left')
         time.sleep(delay)
 
 
 def decrease_angle(steps=1, delay=0.01):
     for _ in range(steps):
-        kb.press('left')
+        kb.press('right')
         time.sleep(delay)
-        kb.release('left')
+        kb.release('right')
         time.sleep(delay)
 
 
@@ -70,7 +71,35 @@ def fire(delay=0.01):
     kb.release('space')
     time.sleep(delay)
    
-# thisss is just experimental stuff havent tested at all
+
+# def get_landing_coords(p1_pos,p2_pos,power,angle):
+#     # This function would ideally use a physics engine or a pre-trained model
+#     # to predict the landing coordinates. For now, we'll use a simplified
+#     # calculation based on the provided instructions.
+
+#     # 1. Measure the center to center distance between the tanks on the computer screen and let it be d.
+#     #    This would typically come from p1_pos and p2_pos.
+#     #    Assuming p1_pos and p2_pos are (x, y) tuples.
+#     if p1_pos is None or p2_pos is None:
+#         return None
+
+#     d_screen = math.sqrt((p2_pos[0] - p1_pos[0])**2 + (p2_pos[1] - p1_pos[1])**2)
+
+#     # 2. Measure its vertical separation on the screen and let it be y.
+#     y_screen = p2_pos[1] - p1_pos[1] # Positive if p2 is lower, negative if p2 is higher
+
+#     # 3. Now let d'=d*cos(sininverse(y/d)).
+#     #    This step seems to imply a projection onto a horizontal plane.
+#     #    However, if y_screen is the vertical separation, and d_screen is the hypotenuse,
+#     #    then the horizontal distance is sqrt(d_screen^2 - y_screen^2).
+#     #    Let's interpret d' as the horizontal distance.
+#     try:
+#         if abs(y_screen) > d_screen: # Should not happen if d_screen is the direct distance
+#             d_prime = 0
+#         else:
+#             d_prime = d_screen * math.cos(math.asin(y_screen / d_screen)er,angle):
+    
+
 def detect_explosion_coordinates(
     hwnd: int,
     game_bbox: Tuple[int, int, int, int],
@@ -78,36 +107,55 @@ def detect_explosion_coordinates(
     threshold: int = 50,
     min_contour_area: int = 100
 ) -> Optional[Tuple[int, int]]:
+    """
+    Fires and then watches the screen for an explosion, returning its coordinates.
 
+    Args:
+        hwnd: The window handle of the game.
+        game_bbox: The bounding box of the game area to watch.
+        timeout_seconds: How long to wait for an explosion before giving up.
+        threshold: Sensitivity for detecting changes in the frame.
+        min_contour_area: The minimum size of a change to be considered an explosion.
+
+    Returns:
+        A tuple (x, y) of the explosion's screen coordinates, or None if not found.
+    """
     bring_window_to_front(hwnd)
     time.sleep(0.1)
 
+    # 1. Capture the "before" state
     img_before = ImageGrab.grab(bbox=game_bbox)
     gray_before = cv2.cvtColor(np.array(img_before), cv2.COLOR_RGB2GRAY)
 
+    # 2. Fire the weapon
     fire()
     print("--- Fired! Watching for impact... ---")
 
     start_time = time.time()
     while time.time() - start_time < timeout_seconds:
+        # 3. Capture new frames
         img_after = ImageGrab.grab(bbox=game_bbox)
+        img_after.save(f"{time.time()}_attack.jpg")
         gray_after = cv2.cvtColor(np.array(img_after), cv2.COLOR_RGB2GRAY)
 
+        # 4. Find the difference
         frame_delta = cv2.absdiff(gray_before, gray_after)
         _, thresh = cv2.threshold(frame_delta, threshold, 255, cv2.THRESH_BINARY)
         
+        # Dilate to fill in holes
         thresh = cv2.dilate(thresh, None, iterations=2)
 
+        # 5. Find contours of the changes
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
         for contour in contours:
             if cv2.contourArea(contour) > min_contour_area:
                 M = cv2.moments(contour)
                 if M["m00"] != 0:
-                    cx = int(M["m10"] / M["m00"]) + game_bbox[0] 
+                    cx = int(M["m10"] / M["m00"]) + game_bbox[0] # Add bbox offset for screen coords
                     cy = int(M["m01"] / M["m00"]) + game_bbox[1]
                     return (cx, cy)
-        time.sleep(0.05) 
+        time.sleep(0.05) # Small delay to not overload CPU
     return None
 
 def find_window_by_title_substring(sub: str) -> Optional[Tuple[int, str]]:
@@ -601,6 +649,39 @@ def annotate_points_on_image(
         print(f"Error annotating image: {e}")
         return None
 
+def predict_landing(p1_pos, angle_deg, power, gravity=9.81):
+    # --- Your coefficient c ---
+    c = 0.0140143 * (1.297212032 ** (10.0 - 0.1 * power))
+
+    x0_s, y0_s = p1_pos
+
+    # Convert screen → physics
+    x0 = x0_s * c
+    y0 = y0_s * c
+
+    # Angle to radians
+    theta = math.radians(angle_deg)
+
+    # ✅ Calibrated velocity scale to match Pocket Tanks
+    k = 0.6862496565988354
+
+    # v = k/c keeps power relation consistent with your formula chain
+    v = k / c
+
+    vx = v * math.cos(theta)
+    vy = v * math.sin(theta)
+
+    # Solve y(t) = y0 + vy*t − 0.5*g*t² = y0  (landing at shooter height)
+    # ⟹ vy*t − 0.5*g*t² = 0 ⟹ t( vy - 0.5*g*t ) = 0
+    # Excluding t = 0 → t = 2*vy/g
+    t = (2.0 * vy) / gravity
+
+    # Physics landing
+    x_land = x0 + vx * t
+    y_land = y0  # same elevation landing
+            # Convert back → screen
+    return (x_land / c, y_land / c)
+
 def get_state():
     ctypes.windll.user32.SetProcessDPIAware()
 
@@ -770,9 +851,10 @@ def main() -> None:
     else:
         print("Full screenshot not found for OCR extraction.")
 
-    decrease_angle(30)
-    decrease_power(35)
-    fire()
+    # increase_angle(30)
+    # increase_angle(35)
+    print(predict_landing(p1_centroid,extracted_angle,extracted_power))
+    # fire()
 
 
 if __name__ == "__main__":
