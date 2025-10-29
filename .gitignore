@@ -1,3 +1,4 @@
 /pocket_tanks_corners
 /__pycache__/
 *.pyc
+/venv
