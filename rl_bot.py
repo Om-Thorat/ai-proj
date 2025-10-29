@@ -4,10 +4,7 @@ import math
 import pickle
 import os
 
-from controls import increase_angle, decrease_angle, increase_power, decrease_power, fire
-from window_utils import find_window_by_title_substring, bring_window_to_front, get_client_screen_rect
-from terrain_utils import predict_landing
-from state import get_state
+import capture_pocket_tanks as pt
 
 # --- Environment Definition ---
 
@@ -30,11 +27,11 @@ class PocketTanksEnv:
 
     def _setup_window(self):
         """Finds the game window and brings it to the front."""
-        found = find_window_by_title_substring("Pocket Tanks")
+        found = pt.find_window_by_title_substring("Pocket Tanks")
         if not found:
             raise Exception("Pocket Tanks window not found.")
         self.hwnd, _ = found
-        bring_window_to_front(self.hwnd)
+        pt.bring_window_to_front(self.hwnd)
         time.sleep(1)
 
     def get_state(self):
@@ -42,62 +39,85 @@ class PocketTanksEnv:
         Captures the current game state.
         Returns a tuple of (angle, power, p1_score, p2_score, p1_pos, p2_pos).
         """
-        return get_state()
+        return pt.get_state()
 
     def step(self, action):
         """
         Performs a full turn: sets angle, sets power, fires, and calculates reward.
         """
-        bring_window_to_front(self.hwnd)
+        pt.bring_window_to_front(self.hwnd)
+        
         state_before = self.get_state()
         current_angle, current_power, p1_score_before, p2_score_before, p1_pos_before, p2_pos_before = state_before
+
         # --- Decode the combined action into angle and power ---
         angle_index = action // self.power_steps
         power_index = action % self.power_steps
+        
         target_angle = angle_index * 20
         target_power = power_index * 10
+
         print(f"Executing Turn: Target Angle={target_angle}, Target Power={target_power}")
         print(current_angle,current_power)
+
         # --- Execute the sequence of actions ---
         # 1. Set Angle
         if current_angle is not None:
             diff = target_angle - current_angle
             print(diff)
             if diff > 0:
-                increase_angle(steps=diff)
+                pt.increase_angle(steps=diff)
             elif diff < 0:
-                decrease_angle(steps=-diff)
+                pt.decrease_angle(steps=-diff)
+        
         time.sleep(0.1)
+
         # 2. Set Power
         if current_power is not None:
             diff = target_power - current_power
             if diff > 0:
-                increase_power(steps=diff)
+                pt.increase_power(steps=diff)
             elif diff < 0:
-                decrease_power(steps=-diff)
+                pt.decrease_power(steps=-diff)
+
         time.sleep(0.1)
+
         # 3. Fire and detect impact
         game_bbox = (0, 60, 1600, 900) # Define your game area bbox
-        l,t,r,b = get_client_screen_rect(self.hwnd)
-        impact_coords = predict_landing(p1_pos_before,target_angle,target_power)
-        fire()
+        l,t,r,b = pt.get_client_screen_rect(self.hwnd)
+        impact_coords = pt.predict_landing(p1_pos_before,target_angle,target_power)
+        pt.fire()
+        # print(impact_coords)
+        # ix, iy = impact_coords
+        # tx, ty = p2_pos_before
+        # distance = math.sqrt((tx - ix)**2 + (ty - iy)**2)
+        # print(f"Impact at {impact_coords}, Target at {p2_pos_before}. Distance: {distance:.2f}")
         reward = 0
         if impact_coords and p2_pos_before:
             ix, iy = impact_coords
             tx, ty = p2_pos_before
             distance = math.sqrt((tx - ix)**2 + (ty - iy)**2)
             print(f"Impact at {impact_coords}, Target at {p2_pos_before}. Distance: {distance:.2f}")
+
             # Reward is inversely proportional to distance. Max reward for a close hit.
             # You can tune these values.
             if distance < 50: # A good hit
                 reward = 1000 - (distance * 10)
             else: # A miss, penalty increases with distance
                 reward = -distance
+
         # Wait for opponent's turn to complete
         time.sleep(5)
-        fire()
+        pt.fire()
         time.sleep(5)
+        # --- Get new state and calculate reward ---
+ 
+
+
+
+
         done = False # In this setup, an episode could be a full game, but we run it step-by-step.
+        
         return self.get_state(), reward, done
 
     def reset(self):

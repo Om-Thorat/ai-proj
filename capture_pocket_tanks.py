@@ -9,7 +9,6 @@ import win32con
 import ctypes
 import colorsys
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 import cv2
 import numpy as np
 
@@ -215,7 +214,7 @@ def capture_full_screenshot(rect: Tuple[int, int, int, int], outdir: str) -> Opt
     left, top, right, bottom = rect
     os.makedirs(outdir, exist_ok=True)
     screenshot = ImageGrab.grab(bbox=(left, top, right, bottom))
-    # Scale to 1600x1200
+    # Resize to 1600x1200
     screenshot = screenshot.resize((1600, 1200), Image.LANCZOS)
     fname = os.path.join(outdir, "latest_screenshot.png")
     screenshot.save(fname)
@@ -427,8 +426,8 @@ def create_mask_and_centroid_for_player(player_label: str,
                                         game_bbox: tuple,
                                         region_bbox: Optional[tuple],
                                         hue_tol: float = 0.07,
-                                        sat_tol: float = 0.28,
-                                        val_tol: float = 0.28) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int]], Optional[Tuple[int,int,int]]]:
+                                        sat_tol: float = 0.90,
+                                        val_tol: float = 0.90) -> Tuple[Optional[np.ndarray], Optional[Tuple[int, int]], Optional[Tuple[int,int,int]]]:
     try:
         dominant = None
 
@@ -442,7 +441,7 @@ def create_mask_and_centroid_for_player(player_label: str,
             return None, None, None
 
         left, top, right, bottom = game_bbox
-        sample_bbox = (left, 60, right, 900)
+        sample_bbox = (0,62, right, 900)
 
         mask = create_color_mask_for_target_in_image(full_screenshot_path, sample_bbox, dominant,
                                                     hue_tol=hue_tol, sat_tol=sat_tol, val_tol=val_tol)
@@ -577,7 +576,7 @@ def _segment_digits_by_projection(img: Image.Image, min_width=2) -> List[Image.I
             segs.append(bw.crop((i, 0, min(i+avg, w), h)))
     return [_normalize_digit_image(s) for s in segs]
 
-def _match_digit_image(img: Image.Image, templates: Dict[int, Image.Image]) -> Tuple[int, float]:
+def _match_digit_image(img: Image.Image, templates: Dict[int, Image.Image]) -> (int, float):
     best = (-1, float("inf"))
     if not templates:
         return best
@@ -652,39 +651,60 @@ def annotate_points_on_image(
         print(f"Error annotating image: {e}")
         return None
 
-def predict_landing(p1_pos, angle_deg, power, gravity=9.81):
-    # --- Your coefficient c ---
-    c = 0.0140143 * (1.297212032 ** (10.0 - 0.1 * power))
+def predict_landing(p1_pos, angle_deg, power):
+    # # === Constants ===
+    # SCREEN_HEIGHT = 900
+    # k = 0.6862496565988354
+    # c = 0.0140143 * (1.297212032 ** (10 - 0.1 * power))
 
-    x0_s, y0_s = p1_pos
+    # if p1_pos is None:
+    #     raise ValueError("p1_pos is None. Cannot unpack coordinates.")
+    # x0_screen, y0_screen_top = p1_pos
+    
+    # # Convert screen pixel → physics world
+    # x0 = x0_screen * c
+    # y0 = (SCREEN_HEIGHT - y0_screen_top) * c  # convert from top-origin to bottom-origin physics
+    
+    # # Physics
+    # angle = math.radians(angle_deg)
+    # v = k / c
+    # vx = v * math.cos(angle)
+    # vy = v * math.sin(angle)
+    # g = 9.8
+    
+    # # Time to return to same vertical level
+    # t = 2 * vy / g
+    
+    # # Physics landing
+    # x_land = x0 + vx * t
+    # y_land = y0  # same height landing
+    
+    # # Convert world → screen top-origin
+    # x_land_screen = x_land / c
+    # y_land_screen_top = SCREEN_HEIGHT - (y_land / c)
 
-    # Convert screen → physics
-    x0 = x0_s * c
-    y0 = y0_s * c
 
-    # Angle to radians
-    theta = math.radians(angle_deg)
+    # return round(x_land_screen), round(y_land_screen_top)
+    x_tank, y_tank = p1_pos
+    # print(f"alpha = {power * power * math.sin(math.radians(2 * angle_deg))}")
+    x_land1 = round(20.67 * power * math.sin(math.radians(2 * angle_deg))) + x_tank
+    x_land2 = round(0.309 * power * power * math.sin(math.radians(2 * angle_deg))) + x_tank
+    x_land = round((x_land1+x_land2)/2)
+    
+    y_land = y_tank
+    return x_land,y_land
 
-    # ✅ Calibrated velocity scale to match Pocket Tanks
-    k = 0.6862496565988354
+def predict_landing_sqrt(p1_pos, angle_deg, power):
+    x_tank, y_tank = p1_pos
+    x_land = round(20.67 * power * math.sin(math.radians(2 * angle_deg))) + x_tank
+    
+    return x_land
 
-    # v = k/c keeps power relation consistent with your formula chain
-    v = k / c
-
-    vx = v * math.cos(theta)
-    vy = v * math.sin(theta)
-
-    # Solve y(t) = y0 + vy*t − 0.5*g*t² = y0  (landing at shooter height)
-    # ⟹ vy*t − 0.5*g*t² = 0 ⟹ t( vy - 0.5*g*t ) = 0
-    # Excluding t = 0 → t = 2*vy/g
-    t = (2.0 * vy) / gravity
-
-    # Physics landing
-    x_land = x0 + vx * t
-    y_land = y0  # same elevation landing
-            # Convert back → screen
-    return (x_land / c, y_land / c)
-
+def predict_landing_lin(p1_pos, angle_deg, power):
+    x_tank, y_tank = p1_pos
+    x_land = round(0.309 * power * power * math.sin(math.radians(2 * angle_deg))) + x_tank
+    return x_land
+    
 def get_state():
     ctypes.windll.user32.SetProcessDPIAware()
 
@@ -728,6 +748,7 @@ def get_state():
         p2_points_region_path = None
         p1_name_region_path = None
         p2_name_region_path = None
+        
 
         extracted_angle = extract_digits_from_image(full_screenshot_path, all_bboxes["angle"])
 
@@ -794,6 +815,23 @@ def main() -> None:
         p2_points_region_path = None
         p1_name_region_path = None
         p2_name_region_path = None
+        
+        for name, bbox in all_bboxes.items():
+            try:
+                cropped_region_img = full_img.crop(bbox)
+                region_path = os.path.join("pocket_tanks_corners", f"{ts}_{name}_region.png")
+                cropped_region_img.save(region_path)
+                print(f"Saved {name} region image to: {region_path}")
+                if name == "p1_points":
+                    p1_points_region_path = region_path
+                elif name == "p2_points":
+                    p2_points_region_path = region_path
+                elif name == "p1_name":
+                    p1_name_region_path = region_path
+                elif name == "p2_name":
+                    p2_name_region_path = region_path
+            except Exception as e:
+                print(f"Error saving {name} region image with bbox={bbox}: {e}")
 
         extracted_angle = extract_digits_from_image(full_screenshot_path, all_bboxes["angle"])
         print(f"Extracted Angle: {extracted_angle}°")
@@ -822,7 +860,37 @@ def main() -> None:
 
         p1_mask, p1_centroid, p1_dom = create_mask_and_centroid_for_player("P1", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p1_name"))
         p2_mask, p2_centroid, p2_dom = create_mask_and_centroid_for_player("P2", full_screenshot_path, game_bbox, region_bbox=all_bboxes.get("p2_name"))
+        
+        predicted_x, predicted_y = predict_landing(p1_centroid, extracted_angle,extracted_power)
+        print(f"I predict it shall land at {predicted_x},{predicted_y}")
+        
+        out_dir = "pocket_tanks_corners"
+        os.makedirs(out_dir, exist_ok=True)
 
+        def _save_mask(mask: Optional[np.ndarray], name: str, dom_color: Optional[Tuple[int,int,int]] = None):
+            if mask is None:
+                print(f"{name} mask: None")
+                return
+            m = mask.copy()
+            if m.dtype == np.bool_:
+                m = (m.astype(np.uint8) * 255)
+            elif m.dtype != np.uint8:
+                m = m.astype(np.uint8)
+            gray_path = os.path.join(out_dir, f"{ts}_{name}_mask.png")
+            cv2.imwrite(gray_path, m)
+            print(f"Saved {name} mask (gray) to: {gray_path}")
+
+            if dom_color:
+                # dom_color is RGB; convert to BGR for OpenCV
+                r, g, b = dom_color
+                color_img = cv2.cvtColor(m, cv2.COLOR_GRAY2BGR)
+                color_img[m > 0] = (b, g, r)
+                color_path = os.path.join(out_dir, f"{ts}_{name}_mask_color.png")
+                cv2.imwrite(color_path, color_img)
+                print(f"Saved {name} colored mask to: {color_path}")
+
+        _save_mask(p1_mask, "p1", p1_dom)
+        _save_mask(p2_mask, "p2", p2_dom)
         print(f"P1 Position: {p1_centroid}")
         print(f"P2 Position: {p2_centroid}")
 
@@ -857,6 +925,18 @@ def main() -> None:
     # increase_angle(30)
     # increase_angle(35)
     print(predict_landing(p1_centroid,extracted_angle,extracted_power))
+    # p2_x, p2_y = p2_centroid
+    # for angle in range(100):
+    #     for power in range(100):
+            
+    #         sqrt = predict_landing_sqrt(p1_centroid,angle,power)
+    #         lin = predict_landing_lin(p1_centroid,angle,power)
+    #         if(abs(sqrt - p2_x) < 3):
+    #             print(f"{angle}, {power}: sqrt")
+    #         if(abs(lin - p2_x) < 3):
+    #             print(f"{angle}, {power}: lin")
+    #         if(abs((sqrt+lin)/2 - p2_x) < 3):
+    #             print(f"{angle}, {power}: avg")
     # fire()
 
 
